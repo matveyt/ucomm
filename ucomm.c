@@ -17,22 +17,28 @@
 #include <sys/ioctl.h>
 #endif
 
-#if defined(__unix__)
-static unsigned unix_baudrate(unsigned baud)
+static unsigned baudrate(int baud)
 {
-    if (baud <= 9600)
-        return B9600;
-    if (baud <= 19200)
-        return B19200;
-    if (baud <= 38400)
-        return B38400;
-    if (baud <= 57600)
-        return B57600;
+    if (baud < 0)
+        baud = -baud;
+#if defined(_WIN32)
+    return baud ? baud : 115200;
+#elif defined(__unix__)
+    if (baud != 0) {
+        static const int ubr[] = {
+            1200, B1200, 2400, B2400, 4800, B4800, 9600, B9600, 19200, B19200,
+            38400, B38400, 57600, B57600, 115200, B115200, 230400, B230400,
+            460800, B460800, 921600, B921600,
+        };
+        for (size_t i = 0; i < sizeof(ubr) / sizeof(ubr[0]); i += 2)
+            if (baud <= ubr[i])
+                return ubr[i + 1];
+    }
     return B115200;
-}
 #endif
+}
 
-intptr_t ucomm_open(const char* port, unsigned baud)
+intptr_t ucomm_open(const char* port, int baud)
 {
 #if defined(_WIN32)
     char fullname[11];  // \\\\.\\COMxxx
@@ -46,16 +52,22 @@ intptr_t ucomm_open(const char* port, unsigned baud)
     }
 
     HANDLE fd = CreateFileA(port, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-        FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH, NULL);
+        0, NULL);
     if (fd != INVALID_HANDLE_VALUE) {
-        DCB dcb;
-        GetCommState(fd, &dcb);
-        dcb.BaudRate = baud;
-        dcb.fDtrControl = DTR_CONTROL_DISABLE;
-        dcb.fRtsControl = RTS_CONTROL_DISABLE;
-        dcb.ByteSize = 8;
-        dcb.Parity = NOPARITY;
-        dcb.StopBits = ONESTOPBIT;
+        DCB dcb = {
+            .DCBlength = sizeof(DCB),
+            .BaudRate = baudrate(baud),
+            .fBinary = 1,
+            .fParity = (baud < 0),
+            .fDtrControl = DTR_CONTROL_DISABLE,
+            .fRtsControl = RTS_CONTROL_DISABLE,
+            .ByteSize = 8,
+            .Parity = (baud < 0) ? EVENPARITY : NOPARITY,
+            .StopBits = ONESTOPBIT,
+            .XonLim = 256,
+            .XoffLim = 256,
+        };
+        SetupComm(fd, 1024, 1024);
         SetCommState(fd, &dcb);
         ucomm_timeout((intptr_t)fd, 0);
     }
@@ -66,10 +78,25 @@ intptr_t ucomm_open(const char* port, unsigned baud)
 
     int fd = open(port, O_RDWR | O_NOCTTY);
     if (fd != -1) {
-        struct termios tio = {0};
-        tio.c_iflag = IGNPAR;
-        tio.c_cflag = CS8 | CREAD | CLOCAL;
-        cfsetospeed(&tio, unix_baudrate(baud));
+        struct termios tio;
+        tcgetattr(fd, &tio);
+
+        //cfmakeraw(&tio);
+        tio.c_iflag &= ~(IGNBRK | BRKINT | IGNPAR | INPCK | ISTRIP | INLCR | IGNCR |
+            ICRNL | IXON | PARMRK);
+        tio.c_oflag &= ~(OPOST);
+        tio.c_cflag &= ~(CSIZE | PARENB | PARODD);
+        tio.c_lflag &= ~(ISIG | ICANON | ECHO | ECHONL | IEXTEN);
+        tio.c_cflag |= (CS8 | CREAD | CLOCAL);
+        if (baud < 0) {
+            // EVEN parity
+            tio.c_iflag |= INPCK;
+            tio.c_cflag |= PARENB;
+        }
+        tio.c_cc[VMIN] = tio.c_cc[VTIME] = 0;
+        unsigned ubr = baudrate(baud);
+        cfsetispeed(&tio, ubr);
+        cfsetospeed(&tio, ubr);
         tcsetattr(fd, TCSANOW, &tio);
     }
 #endif
@@ -80,14 +107,14 @@ intptr_t ucomm_open(const char* port, unsigned baud)
 bool ucomm_timeout(intptr_t fd, unsigned ms)
 {
 #if defined(_WIN32)
-    COMMTIMEOUTS ct = {
+    COMMTIMEOUTS timeouts = {
         .ReadIntervalTimeout = ms ? ms : MAXDWORD,
         .ReadTotalTimeoutConstant = ms,
         .ReadTotalTimeoutMultiplier = 0,
         .WriteTotalTimeoutConstant = 0,
         .WriteTotalTimeoutMultiplier = 0,
     };
-    return SetCommTimeouts((HANDLE)fd, &ct);
+    return SetCommTimeouts((HANDLE)fd, &timeouts);
 #elif defined(__unix__)
     struct termios tio;
     tcgetattr(fd, &tio);
@@ -123,31 +150,52 @@ bool ucomm_purge(intptr_t fd)
 #endif
 }
 
-bool ucomm_ready(intptr_t fd, int dtr_rts)
+bool ucomm_dtr(intptr_t fd, bool pulldown)
 {
 #if defined(_WIN32)
-    return EscapeCommFunction((HANDLE)fd, (dtr_rts & 1) ? SETDTR : CLRDTR)
-        && EscapeCommFunction((HANDLE)fd, (dtr_rts & 2) ? SETRTS : CLRRTS);
+    return EscapeCommFunction((HANDLE)fd, pulldown ? SETDTR : CLRDTR);
 #elif defined(__unix__)
-    int status;
-    ioctl(fd, TIOCMGET, &status);
-    if (dtr_rts & 1)
-        status |= TIOCM_DTR;
-    else
-        status &= ~TIOCM_DTR;
-    if (dtr_rts & 2)
-        status |= TIOCM_RTS;
-    else
-        status &= ~TIOCM_RTS;
-    return (ioctl(fd, TIOCMSET, &status) == 0);
+    return (ioctl(fd, pulldown ? TIOCMBIS : TIOCMBIC, &(int){TIOCM_DTR}) == 0);
 #endif
+}
+
+bool ucomm_rts(intptr_t fd, bool pulldown)
+{
+#if defined(_WIN32)
+    return EscapeCommFunction((HANDLE)fd, pulldown ? SETRTS : CLRRTS);
+#elif defined(__unix__)
+    return (ioctl(fd, pulldown ? TIOCMBIS : TIOCMBIC, &(int){TIOCM_RTS}) == 0);
+#endif
+}
+
+size_t ucomm_available(intptr_t fd)
+{
+#if defined(_WIN32)
+    COMSTAT stat;
+    return ClearCommError((HANDLE)fd, NULL, &stat) ? stat.cbInQue : 0;
+#elif defined(__unix__)
+    int avail = 0;
+    ioctl(fd, FIONREAD, &avail);
+    return avail;
+#endif
+}
+
+int ucomm_getc(intptr_t fd)
+{
+    uint8_t b;
+#if defined(_WIN32)
+    DWORD part;
+    ReadFile((HANDLE)fd, &b, sizeof(b), &part, NULL);
+#elif defined(__unix__)
+    ssize_t part = read(fd, &b, sizeof(b));
+#endif
+    return (part == sizeof(b)) ? (int)b : -1;
 }
 
 size_t ucomm_read(intptr_t fd, void* buffer, size_t length)
 {
     size_t sz = 0;
-
-    do {
+    while (sz < length) {
 #if defined(_WIN32)
         DWORD part;
         ReadFile((HANDLE)fd, (uint8_t*)buffer + sz, length - sz, &part, NULL);
@@ -158,16 +206,24 @@ size_t ucomm_read(intptr_t fd, void* buffer, size_t length)
             sz += part;
         else
             break;
-    } while (sz < length);
-
+    }
     return sz;
+}
+
+bool ucomm_putc(intptr_t fd, int ch)
+{
+    uint8_t b = (uint8_t)ch;
+#if defined(_WIN32)
+    return WriteFile((HANDLE)fd, &b, sizeof(b), &(DWORD){0}, NULL);
+#elif defined(__unix__)
+    return (write(fd, &b, sizeof(b)) == sizeof(b));
+#endif
 }
 
 size_t ucomm_write(intptr_t fd, const void* buffer, size_t length)
 {
     size_t sz = 0;
-
-    do {
+    while (sz < length) {
 #if defined(_WIN32)
         DWORD part;
         WriteFile((HANDLE)fd, (uint8_t*)buffer + sz, length - sz, &part, NULL);
@@ -178,7 +234,6 @@ size_t ucomm_write(intptr_t fd, const void* buffer, size_t length)
             sz += part;
         else
             break;
-    } while (sz < length);
-
+    }
     return sz;
 }

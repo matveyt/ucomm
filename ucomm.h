@@ -11,9 +11,10 @@
 #include <stdint.h>
 
 // open port
-// note: 8-N-1 non-blocking read
-intptr_t ucomm_open(const char* port, unsigned baud);
-// intptr_t fd = ucomm_open("com3", 9600);
+// note: 8-N-1, no read timeout (immediate return)
+// note: negative baud for EVEN parity
+intptr_t ucomm_open(const char* port, int baud);
+// intptr_t fd = ucomm_open("/dev/ttyUSB0", 115200);
 // assert(fd != -1);
 
 // close port
@@ -34,10 +35,21 @@ bool ucomm_purge(intptr_t fd);
 // assert(ucomm_purge(fd));
 
 // set DTR and RTS (cf. "set" means pulldown)
-// note: 1=DTR, 2=RTS, 3=Both
-bool ucomm_ready(intptr_t fd, int dtr_rts);
-// ucomm_ready(fd, 1);
-// ucomm_ready(fd, 0);
+bool ucomm_dtr(intptr_t fd, bool pulldown);
+bool ucomm_rts(intptr_t fd, bool pulldown);
+// ucomm_dtr(fd, true);
+// ucomm_dtr(fd, false);
+
+// get number of bytes in the input buffer
+size_t ucomm_available(intptr_t fd);
+// while (ucomm_available(fd) == 0)
+//     do_other_things();
+
+// read one byte from port
+int ucomm_getc(intptr_t fd);
+// int ch = ucomm_getc(fd);
+// if (ch == -1)
+//     fputs("Timeout\n", stderr);
 
 // read data from port
 size_t ucomm_read(intptr_t fd, void* buffer, size_t length);
@@ -46,6 +58,10 @@ size_t ucomm_read(intptr_t fd, void* buffer, size_t length);
 //     fputs("Timeout: no response\n", stderr);
 // else if (cb < sizeof(buf))
 //     fputs("Timeout: partial response\n", stderr);
+
+// write one byte to port
+bool ucomm_putc(intptr_t fd, int ch);
+// assert(ucomm_putc(fd, 'A'));
 
 // write data to port
 size_t ucomm_write(intptr_t fd, const void* buffer, size_t length);
