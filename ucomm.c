@@ -250,7 +250,7 @@ ssize_t ucomm_write(intptr_t fd, const void* buffer, size_t length)
         ssize_t part = write(fd, (uint8_t*)buffer + sz, length - sz);
         int success = (part >= 0);
 #endif
-        if (!success && sz == 0)
+        if (!success && sz <= 0)
             return -1;
         if (part <= 0)
             break;

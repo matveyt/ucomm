@@ -1,5 +1,5 @@
-This is a bare minimum cross-platform serial port library. It is intended to work with
-USB-TTL programmers only. Blocking read only, almost no features and no documentation.
+This is a bare minimum cross-platform serial port library. Blocking I/O only, almost no
+features and no documentation.
 
 Complete function list:
 ```
