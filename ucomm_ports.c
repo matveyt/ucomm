@@ -17,9 +17,26 @@
 #include <unistd.h>
 #endif
 
-static int strntest(const char* str, const char* test, size_t n);
+#if defined(__unix__)
+// strntest("Hello!", "AZaz", 5) => 0
+// strntest("Hello!", "AZaz", 6) => -1
+static int strntest(const char* str, const char* test, size_t n)
+{
+    if (n == 0)
+        n = strlen(str);
+    for (size_t i = 0; i < n; ++i) {
+        for (const char* p = test; ; p += 2) {
+            if (p[0] == '\0' || str[i] < p[0])
+                return -1;
+            if (p[1] == '\0' || str[i] <= p[1])
+                break;
+        }
+    }
+    return 0;
+}
+#endif
 
-char** ucomm_ports(void)
+size_t ucomm_ports(char*** ports)
 {
     char** result = NULL;
     size_t n = 0, sz = 0, offset = 0;
@@ -120,58 +137,41 @@ char** ucomm_ports(void)
     }
 #endif
 
-    // no ports found
+#if defined(__unix__)
+    if (n > 0) do {
+        // prepend array of (n + 1) pointers
+        // (already done for _WIN32)
+        char* value = (char*)result;
+        size_t extra = (n + 1) * sizeof(char*);
+        // grow buffer if needed
+        if (extra + offset > sz) {
+            value = realloc(value, extra + offset);
+            if (value == NULL) {
+                n = 0;
+                break;
+            }
+            result = (char**)value;
+            sz = extra + offset;
+        }
+        // make room for (n + 1) pointers
+        memmove(value + extra, value, offset);
+        offset = extra;
+        // store n pointers
+        for (size_t i = 0; i < n; ++i) {
+            result[i] = value + offset;
+            offset += strlen(value + offset) + 1;
+        }
+    } while (0);
+#endif
+
     if (n == 0) {
         free(result);
-        return NULL;
+        *ports = NULL;
+        return 0;
     }
 
-#if defined(__unix__)
-    // prepend array of (n + 1) pointers
-    // (already done for _WIN32)
-    char* value = (char*)result;
-    size_t extra = (n + 1) * sizeof(char*);
-    // grow buffer if needed
-    if (extra + offset > sz) {
-        value = realloc(value, extra + offset);
-        if (value == NULL) {
-            free(result);
-            return NULL;
-        }
-        result = (char**)value;
-        sz = extra + offset;
-    }
-    // make room for (n + 1) pointers
-    memmove(value + extra, value, offset);
-    offset = extra;
-    // store n pointers
-    for (size_t i = 0; i < n; ++i) {
-        result[i] = value + offset;
-        offset += strlen(value + offset) + 1;
-    }
-#endif
-
-    // append NULL pointer
-    result[n] = NULL;
     // shrink memory block
-    return (offset < sz) ? realloc(result, offset) : result;
+    *ports = (offset < sz) ? realloc(result, offset) : result;
+    result[n] = NULL;
+    return n;
 }
-
-#if defined(__unix__)
-// strntest("Hello!", "AZaz", 5) => 0
-// strntest("Hello!", "AZaz", 6) => -1
-static int strntest(const char* str, const char* test, size_t n)
-{
-    if (n == 0)
-        n = strlen(str);
-    for (size_t i = 0; i < n; ++i) {
-        for (const char* p = test; ; p += 2) {
-            if (p[0] == '\0' || str[i] < p[0])
-                return -1;
-            if (p[1] == '\0' || str[i] <= p[1])
-                break;
-        }
-    }
-    return 0;
-}
-#endif
